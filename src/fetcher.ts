@@ -1,4 +1,6 @@
 import dns from "node:dns/promises";
+import { Readable } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { URL } from "node:url";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
@@ -247,12 +249,51 @@ async function maybeFetchFromArchive(
       bodyTimeout: 15_000,
     });
     if (res.statusCode >= 400) return null;
-    const body = await readBodyLimited(res.body, maxBytes);
+    const body = await readBodyLimited(
+      decodeByContentEncoding(res.body, res.headers["content-encoding"]),
+      maxBytes,
+    );
     const contentType = String(res.headers["content-type"] ?? "text/html").toLowerCase();
     return { body, contentType };
   } catch {
     return null;
   }
+}
+
+function parseContentEncoding(header: string | string[] | undefined): string[] {
+  if (!header) return [];
+  const value = Array.isArray(header) ? header.join(",") : header;
+  return value
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part.length > 0 && part !== "identity");
+}
+
+function decodeByContentEncoding(
+  body: AsyncIterable<Uint8Array> | null,
+  encodingHeader: string | string[] | undefined,
+): AsyncIterable<Uint8Array> | null {
+  if (!body) return null;
+  const encodings = parseContentEncoding(encodingHeader);
+  if (!encodings.length) return body;
+
+  let stream = Readable.from(body);
+  for (const encoding of encodings.reverse()) {
+    if (encoding === "gzip" || encoding === "x-gzip") {
+      stream = stream.pipe(createGunzip());
+      continue;
+    }
+    if (encoding === "deflate") {
+      stream = stream.pipe(createInflate());
+      continue;
+    }
+    if (encoding === "br") {
+      stream = stream.pipe(createBrotliDecompress());
+      continue;
+    }
+    throw new AppError(`Unsupported content encoding: ${encoding}`, "fetch_error");
+  }
+  return stream;
 }
 
 async function readBodyLimited(
@@ -368,13 +409,21 @@ export async function fetchAndExtract(
       const contentLength = Number(
         Array.isArray(contentLengthHeader) ? contentLengthHeader[0] : contentLengthHeader,
       );
-      if (Number.isFinite(contentLength) && contentLength > config.FETCH_MAX_BODY_BYTES) {
+      const hasCompressedEncoding = parseContentEncoding(res.headers["content-encoding"]).length > 0;
+      if (
+        !hasCompressedEncoding &&
+        Number.isFinite(contentLength) &&
+        contentLength > config.FETCH_MAX_BODY_BYTES
+      ) {
         throw new AppError(
           `Response exceeds max size ${config.FETCH_MAX_BODY_BYTES} bytes`,
           "fetch_error",
         );
       }
     }
+    const decodedBody = archived
+      ? null
+      : decodeByContentEncoding(res.body, res.headers["content-encoding"]);
     const etag = res.headers.etag;
     const lastModified = res.headers["last-modified"];
 
@@ -383,18 +432,18 @@ export async function fetchAndExtract(
     const warnings: string[] = [];
 
     if (!rawBody && contentType.includes("application/pdf")) {
-      const bytes = await readBufferLimited(res.body, config.FETCH_MAX_BODY_BYTES);
+      const bytes = await readBufferLimited(decodedBody, config.FETCH_MAX_BODY_BYTES);
       extracted = await extractPdf(bytes, pages);
       title = "PDF Document";
     } else if (
       !rawBody &&
       (contentType.includes("application/rss+xml") || contentType.includes("application/atom+xml"))
     ) {
-      rawBody = await readBodyLimited(res.body, config.FETCH_MAX_BODY_BYTES);
+      rawBody = await readBodyLimited(decodedBody, config.FETCH_MAX_BODY_BYTES);
       extracted = await extractRss(rawBody);
       title = "RSS Feed";
     } else {
-      if (!rawBody) rawBody = await readBodyLimited(res.body, config.FETCH_MAX_BODY_BYTES);
+      if (!rawBody) rawBody = await readBodyLimited(decodedBody, config.FETCH_MAX_BODY_BYTES);
       let html = rawBody;
       const dom = new JSDOM(html, { url: url.toString() });
       const doc = dom.window.document;

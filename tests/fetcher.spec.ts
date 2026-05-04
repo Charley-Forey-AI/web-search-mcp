@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { gzipSync } from "node:zlib";
 import { MockAgent, setGlobalDispatcher } from "undici";
 import { fetchAndExtract } from "../src/fetcher.js";
 import { loadConfig } from "../src/config.js";
@@ -21,6 +22,20 @@ beforeAll(() => {
         },
       },
     );
+  pool
+    .intercept({ path: "/compressed", method: "GET" })
+    .reply(
+      200,
+      gzipSync(
+        "<html><head><title>Compressed Title</title></head><body><article><p>Compressed body text.</p></article></body></html>",
+      ),
+      {
+        headers: {
+          "content-type": "text/html",
+          "content-encoding": "gzip",
+        },
+      },
+    );
 });
 
 afterAll(async () => {
@@ -34,5 +49,13 @@ describe("fetcher", () => {
     const fetched = await fetchAndExtract("https://example.com/article", config, 5000, "text");
     expect(fetched.title.toLowerCase()).toContain("title");
     expect(fetched.content).toContain("untrusted_content");
+  });
+
+  it("decompresses gzip encoded content before extraction", async () => {
+    process.env.RESPECT_ROBOTS = "false";
+    const config = loadConfig();
+    const fetched = await fetchAndExtract("https://example.com/compressed", config, 5000, "text");
+    expect(fetched.title).toContain("Compressed Title");
+    expect(fetched.content).toContain("Compressed body text");
   });
 });
