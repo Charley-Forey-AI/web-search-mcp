@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "web-search-mcp.fullname" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "web-search-mcp.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "web-search-mcp.name" . }}
+    spec:
+      containers:
+        - name: web-search-mcp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "web-search-mcp.fullname" . }}-config
+            - secretRef:
+                name: {{ include "web-search-mcp.fullname" . }}-secrets
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: {{ .Values.service.targetPort }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.service.targetPort }}

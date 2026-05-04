@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-search-mcp-config
+data:
+  HOST: "0.0.0.0"
+  PORT: "8080"
+  MCP_BASE_PATH: "/mcp"
+  STATE_BACKEND: "sqlite"
+  SQLITE_PATH: "/data/web-search-mcp.sqlite"
+  HTTP_RATE_LIMIT_RPS: "30"

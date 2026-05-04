@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "web-search": {
+      "command": "npx",
+      "args": ["-y", "web-search-mcp", "--stdio"],
+      "env": {
+        "SEARCH_PROVIDER": "duckduckgo"
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+name: web-search-mcp
+description: Web search MCP with multi-provider retrieval and extraction
+runtime: node
+transport:
+  type: streamable-http
+  defaultPath: /mcp
+tools:
+  - search
+  - fetch_url
+  - search_and_extract
+  - news_search
+  - academic_search
+  - get_youtube_transcript
+  - extract_pdf
+  - check_config
+env:
+  - SEARCH_PROVIDER
+  - SEARCH_PROVIDER_FALLBACK
+  - TAVILY_API_KEY
+  - BRAVE_API_KEY
+  - EXA_API_KEY
+  - SERPER_API_KEY
+  - MCP_AUTH_TOKEN
+  - HOST
+  - PORT
+  - MCP_BASE_PATH

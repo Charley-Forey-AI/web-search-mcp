@@ -1,0 +1,31 @@
+replicaCount: 2
+
+image:
+  repository: web-search-mcp
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: nginx
+  hosts:
+    - host: mcp.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+env:
+  HOST: "0.0.0.0"
+  PORT: "8080"
+  MCP_BASE_PATH: "/mcp"
+  STATE_BACKEND: "sqlite"
+  SQLITE_PATH: "/data/web-search-mcp.sqlite"
+  HTTP_RATE_LIMIT_RPS: "30"
+
+secrets:
+  MCP_AUTH_TOKEN: ""
+  TAVILY_API_KEY: ""

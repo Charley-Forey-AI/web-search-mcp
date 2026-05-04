@@ -1,0 +1,15 @@
+services:
+  web-search-mcp:
+    build: ..
+    ports:
+      - "8080:8080"
+    env_file:
+      - ../.env
+    environment:
+      STATE_BACKEND: sqlite
+      SQLITE_PATH: /data/web-search-mcp.sqlite
+    volumes:
+      - web_search_data:/data
+
+volumes:
+  web_search_data:

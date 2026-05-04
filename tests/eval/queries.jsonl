@@ -1,0 +1,10 @@
+{"query":"rust async book","expected_url_patterns":["rust-lang.github.io/async-book","rust-lang.org"]}
+{"query":"aws s3 pricing","expected_url_patterns":["aws.amazon.com/s3/pricing"]}
+{"query":"model context protocol specification","expected_url_patterns":["spec.modelcontextprotocol.io","modelcontextprotocol.io"]}
+{"query":"semantic scholar api docs","expected_url_patterns":["semanticscholar.org","api.semanticscholar.org"]}
+{"query":"python dataclasses documentation","expected_url_patterns":["docs.python.org"]}
+{"query":"nasa mars news","expected_url_patterns":["nasa.gov"]}
+{"query":"typescript handbook","expected_url_patterns":["typescriptlang.org/docs/"]}
+{"query":"react useeffect docs","expected_url_patterns":["react.dev/reference/react/useEffect"]}
+{"query":"cdc flu vaccine guidance","expected_url_patterns":["cdc.gov"]}
+{"query":"kubernetes pod lifecycle docs","expected_url_patterns":["kubernetes.io/docs/"]}

@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-search-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-search-mcp
+  template:
+    metadata:
+      labels:
+        app: web-search-mcp
+    spec:
+      containers:
+        - name: web-search-mcp
+          image: web-search-mcp:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: web-search-mcp-config
+            - secretRef:
+                name: web-search-mcp-secrets
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
