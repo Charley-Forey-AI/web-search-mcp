@@ -1036,6 +1036,16 @@ function createStreamableHttpServer(transport: StreamableHTTPServerTransport): S
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
         }
+        // The transport is stateless and shared across clients. The SDK's
+        // DELETE handler unconditionally calls transport.close(), which would
+        // tear down the single shared instance and break every other client.
+        // There is no per-client session to clean up in stateless mode, so
+        // just acknowledge the request.
+        if (req.method === "DELETE") {
+          res.statusCode = 200;
+          res.end();
+          return;
+        }
         // Normalize headers for the MCP Streamable HTTP transport.
         // The SDK strictly requires `Accept: application/json, text/event-stream`
         // on POST and `Accept: text/event-stream` on GET. Some MCP clients and
@@ -1115,8 +1125,16 @@ async function main() {
   const hostArg = process.argv.includes("--host")
     ? process.argv[process.argv.indexOf("--host") + 1]
     : config.HOST;
+  // Stateless transport so a single shared instance can serve unrelated
+  // clients (e.g. Cursor's full session-based handshake AND a remote agent
+  // that fires one-shot tools/call POSTs without an initialize). With
+  // sessionIdGenerator=undefined the SDK skips session validation entirely,
+  // so non-initialize requests aren't rejected with "Server not initialized".
+  // enableJsonResponse=true makes POST responses plain JSON instead of SSE,
+  // which simple HTTP clients can consume without an SSE parser.
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
     enableDnsRebindingProtection: true,
     allowedHosts: config.allowedHosts.length ? config.allowedHosts : undefined,
     allowedOrigins: config.allowedOrigins.length ? config.allowedOrigins : undefined,
