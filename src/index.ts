@@ -32,21 +32,18 @@ import { dedupeAndDiversify } from "./canonicalize.js";
 const config = loadConfig();
 const logger = new Logger(config.DEBUG);
 
-const server = new McpServer(
-  {
-    name: "web-search-mcp",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      logging: {},
-      completions: {},
-      prompts: { listChanged: true },
-      resources: { listChanged: true, subscribe: true },
-      tools: { listChanged: true },
-    },
-  },
-);
+const serverInfo = {
+  name: "web-search-mcp",
+  version: "0.1.0",
+};
+
+const serverCapabilities = {
+  logging: {},
+  completions: {},
+  prompts: { listChanged: true },
+  resources: { listChanged: true, subscribe: true },
+  tools: { listChanged: true },
+};
 
 const providers = buildProviders(config);
 const primaryProvider = resolvePrimaryProvider(providers, config);
@@ -134,6 +131,37 @@ function checkAuthHeader(req: IncomingMessage): boolean {
   return value === `Bearer ${config.MCP_AUTH_TOKEN}`;
 }
 
+function createHttpTransport(): StreamableHTTPServerTransport {
+  return new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+    enableDnsRebindingProtection: true,
+    allowedHosts: config.allowedHosts.length ? config.allowedHosts : undefined,
+    allowedOrigins: config.allowedOrigins.length ? config.allowedOrigins : undefined,
+  });
+}
+
+async function readRequestBody(
+  req: IncomingMessage,
+  maxBytes: number,
+): Promise<{ raw: Buffer; preview: string }> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      throw new Error("payload_too_large");
+    }
+    chunks.push(buf);
+  }
+  const raw = Buffer.concat(chunks);
+  return {
+    raw,
+    preview: raw.subarray(0, 1024).toString("utf-8"),
+  };
+}
+
 function resultToMarkdown(
   results: Array<{ title: string; url: string; snippet: string; publishedAt?: string }>,
 ): string {
@@ -168,6 +196,7 @@ function isAmbiguous(query: string): boolean {
   return q.split(/\s+/).length === 1 || ["jordan", "mercury", "python", "apple"].includes(q);
 }
 
+function registerHandlers(server: McpServer): void {
 server.registerTool(
   "search",
   {
@@ -1011,6 +1040,16 @@ server.registerResource(
   },
 );
 
+}
+
+function buildMcpServer(): McpServer {
+  const server = new McpServer(serverInfo, {
+    capabilities: serverCapabilities,
+  });
+  registerHandlers(server);
+  return server;
+}
+
 async function startupCheck(): Promise<void> {
   const available = Object.values(providers)
     .filter((p) => p.canUse())
@@ -1038,10 +1077,11 @@ async function startupCheck(): Promise<void> {
 let ready = false;
 let shuttingDown = false;
 
-function createStreamableHttpServer(transport: StreamableHTTPServerTransport): Server {
+function createStreamableHttpServer(): Server {
   return createServer(async (req, res) => {
     const startedAt = Date.now();
     const requestId = String(req.headers["x-request-id"] ?? randomUUID());
+    let requestBodyPreview = "";
     try {
       res.setHeader("x-request-id", requestId);
       logger.info({
@@ -1059,6 +1099,17 @@ function createStreamableHttpServer(transport: StreamableHTTPServerTransport): S
           status: res.statusCode,
           duration_ms: Date.now() - startedAt,
         });
+        if (res.statusCode >= 500) {
+          logger.warn({
+            msg: "http_request_5xx",
+            request_id: requestId,
+            method: req.method ?? "",
+            path: req.url ?? "",
+            status: res.statusCode,
+            user_agent: String(req.headers["user-agent"] ?? ""),
+            body_preview: requestBodyPreview,
+          });
+        }
       });
       applyCorsHeaders(res);
 
@@ -1153,7 +1204,45 @@ function createStreamableHttpServer(transport: StreamableHTTPServerTransport): S
             req.headers["accept"] = "text/event-stream";
           }
         }
-        await transport.handleRequest(req, res);
+        let parsedBody: unknown;
+        if (req.method === "POST") {
+          const body = await readRequestBody(req, config.HTTP_JSON_BODY_MAX_BYTES);
+          requestBodyPreview = body.preview;
+          if (!body.raw.length) {
+            res.setHeader("content-type", "application/json");
+            res.statusCode = 400;
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32700, message: "Parse error: Invalid JSON" },
+                id: null,
+              }),
+            );
+            return;
+          }
+          try {
+            parsedBody = JSON.parse(body.raw.toString("utf-8"));
+          } catch {
+            res.setHeader("content-type", "application/json");
+            res.statusCode = 400;
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32700, message: "Parse error: Invalid JSON" },
+                id: null,
+              }),
+            );
+            return;
+          }
+        }
+        const requestServer = buildMcpServer();
+        const requestTransport = createHttpTransport();
+        res.on("close", () => {
+          void requestTransport.close().catch(() => undefined);
+          void requestServer.close().catch(() => undefined);
+        });
+        await requestServer.connect(requestTransport);
+        await requestTransport.handleRequest(req, res, parsedBody);
         return;
       }
 
@@ -1161,7 +1250,14 @@ function createStreamableHttpServer(transport: StreamableHTTPServerTransport): S
       res.statusCode = 404;
       res.end(JSON.stringify({ error: "not_found" }));
     } catch (error) {
-      logger.error({ msg: asUserSafeError(error) });
+      logger.error({
+        msg: asUserSafeError(error),
+        request_id: requestId,
+        method: req.method ?? "",
+        path: req.url ?? "",
+        error_message: error instanceof Error ? error.message : String(error),
+        error_stack: error instanceof Error ? error.stack : undefined,
+      });
       if (!res.headersSent) {
         res.setHeader("content-type", "application/json");
         res.statusCode = 500;
@@ -1199,8 +1295,9 @@ async function main() {
   }
 
   if (process.argv.includes("--stdio")) {
+    const stdioServer = buildMcpServer();
     const stdioTransport = new StdioServerTransport();
-    await server.connect(stdioTransport);
+    await stdioServer.connect(stdioTransport);
     logger.info({ msg: "server_started_stdio", provider: primaryProvider.name });
     return;
   }
@@ -1211,26 +1308,7 @@ async function main() {
   const hostArg = process.argv.includes("--host")
     ? process.argv[process.argv.indexOf("--host") + 1]
     : config.HOST;
-  // Stateless transport so a single shared instance can serve unrelated
-  // clients (e.g. Cursor's full session-based handshake AND a remote agent
-  // that fires one-shot tools/call POSTs without an initialize). With
-  // sessionIdGenerator=undefined the SDK skips session validation entirely,
-  // so non-initialize requests aren't rejected with "Server not initialized".
-  // enableJsonResponse=true makes POST responses plain JSON instead of SSE,
-  // which simple HTTP clients can consume without an SSE parser.
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-    enableDnsRebindingProtection: true,
-    allowedHosts: config.allowedHosts.length ? config.allowedHosts : undefined,
-    allowedOrigins: config.allowedOrigins.length ? config.allowedOrigins : undefined,
-  });
-  await server.connect(transport);
-  transport.onclose = () => {
-    logger.info({ msg: "streamable_transport_closed" });
-  };
-
-  const httpServer = createStreamableHttpServer(transport);
+  const httpServer = createStreamableHttpServer();
   httpServer.listen(portArg, hostArg, () => {
     ready = true;
     logger.info({
@@ -1251,8 +1329,6 @@ async function main() {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));
     });
-    await transport.close();
-    await server.close();
     await closeFetcherResources();
     clearTimeout(hardTimeout);
     logger.info({ msg: "shutdown_complete" });

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import net from "node:net";
+import { randomUUID } from "node:crypto";
 
 function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -52,6 +53,32 @@ describe("streamable MCP HTTP server", () => {
   let baseUrl: string;
   const mcpPath = "/mcp/search";
 
+  async function callTool(
+    name: string,
+    args: Record<string, unknown> = {},
+  ): Promise<{ status: number; text: string; json: any }> {
+    const res = await fetch(`${baseUrl}${mcpPath}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: "Bearer test-token",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: randomUUID(),
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+    const text = await res.text();
+    return {
+      status: res.status,
+      text,
+      json: text ? JSON.parse(text) : undefined,
+    };
+  }
+
   beforeAll(async () => {
     const port = await getFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
@@ -99,5 +126,38 @@ describe("streamable MCP HTTP server", () => {
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("unauthorized");
+  });
+
+  it("handles one-shot tools/call requests", async () => {
+    const response = await callTool("current_time");
+    expect(response.status).toBe(200);
+    expect(response.text.length).toBeGreaterThan(0);
+    expect(response.json?.result?.structuredContent?.iso).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+    );
+  });
+
+  it("handles sequential tools/call requests", async () => {
+    const first = await callTool("current_time");
+    const second = await callTool("current_time");
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.text.length).toBeGreaterThan(0);
+    expect(second.text.length).toBeGreaterThan(0);
+    expect(first.json?.result?.structuredContent?.iso).toBeTruthy();
+    expect(second.json?.result?.structuredContent?.iso).toBeTruthy();
+  });
+
+  it("handles concurrent tools/call requests", async () => {
+    const results = await Promise.all([
+      callTool("current_time"),
+      callTool("current_time"),
+      callTool("current_time"),
+    ]);
+    for (const result of results) {
+      expect(result.status).toBe(200);
+      expect(result.text.length).toBeGreaterThan(0);
+      expect(result.json?.result?.structuredContent?.iso).toBeTruthy();
+    }
   });
 });
