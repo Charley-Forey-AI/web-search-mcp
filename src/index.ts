@@ -954,14 +954,25 @@ let shuttingDown = false;
 
 function createStreamableHttpServer(transport: StreamableHTTPServerTransport): Server {
   return createServer(async (req, res) => {
+    const startedAt = Date.now();
+    const requestId = String(req.headers["x-request-id"] ?? randomUUID());
     try {
-      const requestId = String(req.headers["x-request-id"] ?? randomUUID());
       res.setHeader("x-request-id", requestId);
       logger.info({
         msg: "http_request_start",
         request_id: requestId,
         method: req.method ?? "",
         path: req.url ?? "",
+      });
+      res.on("finish", () => {
+        logger.info({
+          msg: "http_request_end",
+          request_id: requestId,
+          method: req.method ?? "",
+          path: req.url ?? "",
+          status: res.statusCode,
+          duration_ms: Date.now() - startedAt,
+        });
       });
       applyCorsHeaders(res);
 
@@ -1024,6 +1035,27 @@ function createStreamableHttpServer(transport: StreamableHTTPServerTransport): S
           res.statusCode = 401;
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
+        }
+        // Normalize headers for the MCP Streamable HTTP transport.
+        // The SDK strictly requires `Accept: application/json, text/event-stream`
+        // on POST and `Accept: text/event-stream` on GET. Some MCP clients and
+        // validators (notably Cursor's settings-UI probe) send a looser Accept
+        // header and would otherwise be rejected with a -32000 "Not Acceptable"
+        // JSON-RPC error before the handshake can begin. Force the headers the
+        // transport expects so any compliant JSON-RPC client can connect.
+        const accept = String(req.headers["accept"] ?? "").toLowerCase();
+        if (req.method === "POST") {
+          if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
+            req.headers["accept"] = "application/json, text/event-stream";
+          }
+          const ct = String(req.headers["content-type"] ?? "").toLowerCase();
+          if (!ct.includes("application/json")) {
+            req.headers["content-type"] = "application/json";
+          }
+        } else if (req.method === "GET") {
+          if (!accept.includes("text/event-stream")) {
+            req.headers["accept"] = "text/event-stream";
+          }
         }
         await transport.handleRequest(req, res);
         return;
