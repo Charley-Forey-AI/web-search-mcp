@@ -65,7 +65,7 @@
     "turndown": "^7.2.0",
     "undici": "^7.16.0",
     "youtube-transcript": "^1.2.1",
-    "zod": "^3.24.1"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
