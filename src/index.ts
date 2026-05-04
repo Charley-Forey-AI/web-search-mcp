@@ -24,7 +24,7 @@ import { buildProviders, resolvePrimaryProvider } from "./providers/router.js";
 import { runSearch } from "./search-service.js";
 import { closeFetcherResources, fetchAndExtract, type FetchExtractResult } from "./fetcher.js";
 import { chunkText } from "./chunking.js";
-import { rerankWithSampling, refineQueryWithSampling, summarizeWithSampling } from "./sampling.js";
+import { refineQueryWithSampling } from "./sampling.js";
 import { storePage, storeSearch, getPage, getSearch, listPages, listSearches } from "./memory.js";
 import { keyFor, urlCache } from "./cache.js";
 import { dedupeAndDiversify } from "./canonicalize.js";
@@ -171,6 +171,64 @@ function resultToMarkdown(
       return `${i + 1}. [${r.title}](${r.url})${date}\n   ${r.snippet}`;
     })
     .join("\n");
+}
+
+const SEARCH_AND_EXTRACT_TEXT_LIMIT = 12_000;
+const SEARCH_AND_EXTRACT_MIN_CONTENT_CHARS = 240;
+
+function capContentForSearchExtractText(
+  results: Array<Record<string, unknown>>,
+  capChars: number,
+): Array<Record<string, unknown>> {
+  return results.map((result) => {
+    if (typeof result.content !== "string") return result;
+    if (result.content.length <= capChars) return result;
+    const suffix = "\n\n[trimmed to fit response size]";
+    const trimmedChars = Math.max(0, capChars - suffix.length);
+    return {
+      ...result,
+      content: `${result.content.slice(0, trimmedChars)}${suffix}`,
+    };
+  });
+}
+
+function fitSearchAndExtractText(
+  results: Array<Record<string, unknown>>,
+  limit: number,
+): { results: Array<Record<string, unknown>>; text: string } {
+  const initialText = JSON.stringify(results, null, 2);
+  if (initialText.length <= limit) return { results, text: initialText };
+
+  const contentLengths = results
+    .map((result) => (typeof result.content === "string" ? result.content.length : 0))
+    .filter((len) => len > 0);
+  if (!contentLengths.length) {
+    return { results, text: initialText.slice(0, limit) };
+  }
+
+  let low = SEARCH_AND_EXTRACT_MIN_CONTENT_CHARS;
+  let high = Math.max(...contentLengths);
+  let bestResults = capContentForSearchExtractText(results, low);
+  let bestText = JSON.stringify(bestResults, null, 2);
+
+  if (bestText.length > limit) {
+    return { results: bestResults, text: bestText.slice(0, limit) };
+  }
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const cappedResults = capContentForSearchExtractText(results, mid);
+    const cappedText = JSON.stringify(cappedResults, null, 2);
+    if (cappedText.length <= limit) {
+      bestResults = cappedResults;
+      bestText = cappedText;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return { results: bestResults, text: bestText };
 }
 
 // Header included verbatim at the top of every search/news/extract response.
@@ -422,7 +480,15 @@ server.registerTool(
         content: [{ type: "text", text: asUserSafeError(error) }],
       };
     } finally {
-      metrics.fetchLatency.push(Date.now() - started);
+      const durationMs = Date.now() - started;
+      metrics.fetchLatency.push(durationMs);
+      logger.info({
+        msg: "fetch_complete",
+        tool: "fetch_url",
+        url,
+        duration_ms: durationMs,
+        status: ok ? "ok" : "error",
+      });
       incrementToolMetric("fetch_url", ok);
       span.setStatus({ code: ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       span.end();
@@ -485,13 +551,14 @@ server.registerTool(
         primaryProvider,
         { config, logger, providers },
       );
-      const ranked = await rerankWithSampling(server, query, searchResult.results);
-      const top = ranked.slice(0, max_results);
-      const results: Array<Record<string, unknown>> = [];
+      const top = searchResult.results.slice(0, max_results);
+      const resultsByIndex: Array<Record<string, unknown> | undefined> = new Array(top.length);
       let done = 0;
       const progressToken: ProgressToken = randomUUID();
-      await Promise.all(
-        top.map(async (item) => {
+      const extractionPromise = Promise.all(
+        top.map(async (item, index) => {
+          const fetchStartedAt = Date.now();
+          let status: "ok" | "error" = "error";
           try {
             const fetched = await fetchAndExtract(
               item.url,
@@ -502,7 +569,7 @@ server.registerTool(
             );
             storePage(fetched);
             const chunks = chunkText(fetched.canonicalUrl, fetched.content);
-            results.push({
+            resultsByIndex[index] = {
               title: item.title,
               url: item.url,
               snippet: item.snippet,
@@ -510,14 +577,22 @@ server.registerTool(
               truncated: fetched.truncated,
               warnings: fetched.warnings,
               chunks: chunks.map((c) => ({ id: c.id, quote: c.quote })),
-            });
+            };
+            status = "ok";
           } catch (error) {
-            results.push({
+            resultsByIndex[index] = {
               title: item.title,
               url: item.url,
               error: asUserSafeError(error),
-            });
+            };
           } finally {
+            logger.info({
+              msg: "fetch_complete",
+              tool: "search_and_extract",
+              url: item.url,
+              duration_ms: Date.now() - fetchStartedAt,
+              status,
+            });
             done++;
             try {
               const progressNotification: ProgressNotification = {
@@ -536,15 +611,39 @@ server.registerTool(
           }
         }),
       );
-      let text = JSON.stringify(results, null, 2);
-      if (text.length > 12000) {
-        text = await summarizeWithSampling(server, text);
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const raceResult = await Promise.race([
+        extractionPromise.then(() => "complete" as const),
+        new Promise<"timed_out">((resolve) => {
+          timeoutHandle = setTimeout(() => resolve("timed_out"), config.SEARCH_AND_EXTRACT_TIMEOUT_MS);
+        }),
+      ]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (raceResult === "timed_out") {
+        for (let i = 0; i < top.length; i++) {
+          if (!resultsByIndex[i]) {
+            resultsByIndex[i] = {
+              title: top[i].title,
+              url: top[i].url,
+              snippet: top[i].snippet,
+              error: `timed out after ${config.SEARCH_AND_EXTRACT_TIMEOUT_MS}ms`,
+              warnings: [`timed out after ${config.SEARCH_AND_EXTRACT_TIMEOUT_MS}ms`],
+            };
+          }
+        }
+        void extractionPromise.catch(() => undefined);
+      } else {
+        await extractionPromise;
       }
+
+      const results = resultsByIndex.filter((result): result is Record<string, unknown> => Boolean(result));
+      const fit = fitSearchAndExtractText(results, SEARCH_AND_EXTRACT_TEXT_LIMIT);
+      ok = true;
       return {
-        content: [{ type: "text", text }],
+        content: [{ type: "text", text: fit.text }],
         structuredContent: {
           provider: searchResult.providerUsed,
-          results,
+          results: fit.results,
         },
         _meta: {
           provider: searchResult.providerUsed,

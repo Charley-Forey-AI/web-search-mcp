@@ -42,6 +42,7 @@ export const envSchema = z.object({
   FETCH_HEADERS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
   FETCH_BODY_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
   FETCH_MAX_BODY_BYTES: z.coerce.number().int().min(1024).max(50_000_000).default(5_000_000),
+  SEARCH_AND_EXTRACT_TIMEOUT_MS: z.coerce.number().int().min(1).max(300000).default(45000),
   HTTP_JSON_BODY_MAX_BYTES: z.coerce.number().int().min(1024).max(5_000_000).default(262144),
   SHUTDOWN_DRAIN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(25000),
   HTTP_RATE_LIMIT_RPS: z.coerce.number().int().min(1).max(1000).default(30),

@@ -89,6 +89,7 @@ describe("streamable MCP HTTP server", () => {
         SEARCH_PROVIDER: "duckduckgo",
         MCP_AUTH_TOKEN: "test-token",
         MCP_BASE_PATH: mcpPath,
+        SEARCH_AND_EXTRACT_TIMEOUT_MS: "10",
       },
       stdio: "pipe",
     });
@@ -159,5 +160,28 @@ describe("streamable MCP HTTP server", () => {
       expect(result.text.length).toBeGreaterThan(0);
       expect(result.json?.result?.structuredContent?.iso).toBeTruthy();
     }
+  });
+
+  it("returns timeout placeholders for slow search_and_extract runs", async () => {
+    const startedAt = Date.now();
+    const response = await callTool("search_and_extract", {
+      query: "trimble",
+      max_results: 3,
+      max_chars_per_result: 3000,
+    });
+    const durationMs = Date.now() - startedAt;
+    expect(response.status).toBe(200);
+    expect(durationMs).toBeLessThan(5000);
+    const results = (response.json?.result?.structuredContent?.results ?? []) as Array<{
+      error?: string;
+      warnings?: string[];
+    }>;
+    expect(results.length).toBeGreaterThan(0);
+    const hasTimeoutEntry = results.some(
+      (result) =>
+        result.error?.includes("timed out after") ||
+        result.warnings?.some((warning) => warning.includes("timed out after")),
+    );
+    expect(hasTimeoutEntry).toBe(true);
   });
 });
